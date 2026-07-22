@@ -275,6 +275,8 @@ footer.confidential{text-align:center;padding:20px;color:var(--paper);opacity:.5
 .search-input{padding:8px 10px;border-radius:4px;border:1px solid var(--paper-dark);font-family:'Courier New',monospace;font-size:12.5px;background:var(--paper);min-width:250px;}
 .case-tile .minor{font-size:11px;color:var(--ink-soft);margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;}
 .lock-screen{position:fixed;inset:0;background:rgba(15,10,7,.9);backdrop-filter:blur(5px);z-index:400;display:none;align-items:center;justify-content:center;padding:20px;}
+.boot-overlay{position:fixed;inset:0;background:var(--cork);z-index:500;display:flex;align-items:center;justify-content:center;padding:20px;}
+.boot-overlay.hide{display:none;}
 .lock-screen.show{display:flex;}
 .lock-card{width:min(560px,100%);background:linear-gradient(180deg,#2a2018,#1c150f);border:1px solid #5d452b;border-radius:10px;box-shadow:0 18px 60px rgba(0,0,0,.55);padding:28px;color:var(--paper);}
 .lock-card h2{margin:0 0 8px;color:var(--gold-bright);font-size:26px;}
@@ -347,6 +349,9 @@ footer.confidential{text-align:center;padding:20px;color:var(--paper);opacity:.5
 .summary-case{margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;}
 .summary-note{margin-top:10px;color:#4e3a25;line-height:1.5;white-space:pre-wrap;}
 </style>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 </head>
 <body>
 
@@ -813,6 +818,7 @@ footer.confidential{text-align:center;padding:20px;color:var(--paper);opacity:.5
       <div class="field"><label>Rôle</label>
         <select id="newUserRole"><option value="user">Utilisateur</option><option value="viewer">Lecture seule</option><option value="admin">Admin</option></select>
       </div>
+      <div class="field"><label>Matricule</label><input id="newUserMatricule" placeholder="ex : 177" style="max-width:120px;"></div>
     </div>
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:8px;">
       <input type="checkbox" id="newUserIsID" checked> Accès à la section ID (Investigation Division)
@@ -1169,6 +1175,13 @@ footer.confidential{text-align:center;padding:20px;color:var(--paper);opacity:.5
   </div>
 </div>
 
+<div class="boot-overlay" id="bootOverlay">
+  <div class="lock-card" style="text-align:center;">
+    <h2>BCSO — Intranet</h2>
+    <p id="bootMessage" style="color:var(--ink-soft);font-size:14px;">Connexion à la base de données…</p>
+  </div>
+</div>
+
 <div class="lock-screen" id="lockScreen">
   <div class="lock-card">
     <h2>Connexion</h2>
@@ -1307,6 +1320,7 @@ function normalizeData(d){
     if(typeof u.isBCSA !== 'boolean') u.isBCSA = true; // comptes créés avant cette fonctionnalité : accès conservé
     if(typeof u.isSupervision !== 'boolean') u.isSupervision = false; // accès sensible : pas de rattrapage automatique, opt-in uniquement
     if(!u.equipment) u.equipment = [];
+    if(typeof u.matricule !== 'string') u.matricule = '';
   });
   if(!d.shifts) d.shifts = [];
   if(!d.interventionReports) d.interventionReports = [];
@@ -1328,7 +1342,22 @@ function migrateLegacy(old){
   return { nextSeq:2, cases:[migratedCase], suspects:migratedSuspects };
 }
 
-let data = normalizeData(loadData());
+/* ============ FIREBASE ============ */
+const firebaseConfig = {
+  apiKey: "AIzaSyAjndzYCA_HYyitD8FpF28C9zp7UDcgAeg",
+  authDomain: "bcsolwwl.firebaseapp.com",
+  projectId: "bcsolwwl",
+  storageBucket: "bcsolwwl.firebasestorage.app",
+  messagingSenderId: "1036005349847",
+  appId: "1:1036005349847:web:10dbe6e8084d2083fe5392",
+  measurementId: "G-97GC6MJRQ9"
+};
+firebase.initializeApp(firebaseConfig);
+const fbAuth = firebase.auth();
+const fbDb = firebase.firestore();
+const DOC_REF = fbDb.collection('appstate').doc('main');
+
+let data = null;
 let currentCaseId = null;
 let saveTimer = null;
 let boardSelectedSuspectId = null;
@@ -1342,9 +1371,21 @@ function setSaveIndicator(msg, dirty=false){
   el.style.color = dirty ? '#f3c46c' : '';
 }
 function markDirty(){
-  setSaveIndicator('Modifications non sauvegardées', true);
+  setSaveIndicator('Modifications non sauvegardées…', true);
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(()=>saveData(), 500);
+  saveTimer = setTimeout(()=>pushToFirestore(), 500);
+}
+let lastPushedJSON = null;
+function pushToFirestore(){
+  if(!data) return;
+  const json = JSON.stringify(data);
+  lastPushedJSON = json;
+  DOC_REF.set(data).then(()=>{
+    setSaveIndicator('Enregistré', false);
+  }).catch(err=>{
+    console.error('Firestore save failed', err);
+    setSaveIndicator('⚠️ Échec de la sauvegarde — vérifie ta connexion', true);
+  });
 }
 function nowStamp(){
   return new Date().toLocaleString('fr-FR');
@@ -1486,7 +1527,10 @@ function renderBoardSuspectPicker(){
   box.querySelectorAll('[data-pick-suspect]').forEach(el=>el.onclick=()=>{ boardSelectedSuspectId = el.dataset.pickSuspect; renderBoardSuspectPicker(); });
 }
 
-function saveData(){ localStorage.setItem('bcso_enquetes_data', JSON.stringify(data)); renderCaseListStats(); }
+function saveData(){
+  renderCaseListStats();
+  markDirty();
+}
 function uid(prefix){ return prefix + Math.random().toString(36).slice(2,9); }
 function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 function getCase(id){ return data.cases.find(c=>c.id===id); }
@@ -2295,7 +2339,7 @@ function renderSupervision(){
   }
 
   const equipWrap = document.getElementById('supervisionEquipWrap');
-  const withEquip = data.users.filter(u => u.equipment && u.equipment.length>0);
+  const withEquip = sortUsersByMatricule(data.users.filter(u => u.equipment && u.equipment.length>0));
   if(withEquip.length===0){
     equipWrap.innerHTML = '<div class="empty-msg">Aucun équipement enregistré pour l\'instant.</div>';
     return;
@@ -2309,7 +2353,7 @@ function renderSupervision(){
         <div style="font-size:12.5px;color:var(--ink-soft);">Munitions tirées : ${eq.roundsFired||0}</div>
       </div>`).join('');
     return `<div style="margin-bottom:22px;">
-      <h4 style="font-family:'Special Elite',monospace;color:var(--string);font-size:14px;margin-bottom:8px;">${escapeHtml(u.username)}</h4>
+      <h4 style="font-family:'Special Elite',monospace;color:var(--string);font-size:14px;margin-bottom:8px;">${u.matricule ? '['+escapeHtml(u.matricule)+'] ':''}${escapeHtml(u.username)}</h4>
       <div class="grid">${cards}</div>
     </div>`;
   }).join('');
@@ -2367,6 +2411,16 @@ function syncBallisticFromShift(username, ammoEnd){
 }
 
 /* ---- Rapport balistique ---- */
+function sortUsersByMatricule(users){
+  return users.slice().sort((a,b)=>{
+    const ma = parseInt(a.matricule,10), mb = parseInt(b.matricule,10);
+    const va = isNaN(ma), vb = isNaN(mb);
+    if(va && vb) return a.username.localeCompare(b.username);
+    if(va) return 1;
+    if(vb) return -1;
+    return ma-mb;
+  });
+}
 function renderBallisticAgentOptions(){
   const sel = document.getElementById('ballisticAgentSelect');
   const label = document.getElementById('ballisticAgentLabel');
@@ -2381,7 +2435,7 @@ function renderBallisticAgentOptions(){
   label.textContent = 'Agent';
   const current = sel.value;
   sel.disabled = false;
-  sel.innerHTML = data.users.map(u=>`<option value="${escapeHtml(u.username)}">${escapeHtml(u.username)}</option>`).join('');
+  sel.innerHTML = sortUsersByMatricule(data.users).map(u=>`<option value="${escapeHtml(u.username)}">${u.matricule ? '['+escapeHtml(u.matricule)+'] ':''}${escapeHtml(u.username)}</option>`).join('');
   if(current && data.users.find(u=>u.username===current)) sel.value = current;
 }
 function renderBallisticEquip(){
@@ -3159,6 +3213,7 @@ function renderAccessManager(){
       <div class="user-row-head">
         <strong>${escapeHtml(u.username)}</strong>
         <span class="role-badge ${isAdmin?'admin':''} ${isViewerRole?'viewer':''}">${roleLabel}</span>
+        <input type="text" data-act="matricule" value="${escapeHtml(u.matricule||'')}" placeholder="Matricule" style="width:90px;padding:5px 7px;border:1px solid var(--paper-dark);border-radius:4px;font-family:'Courier New',monospace;font-size:12px;">
         <div class="user-row-actions">
           <button class="btn" data-act="pass">Changer le mot de passe</button>
           <button class="btn danger" data-act="del">Supprimer</button>
@@ -3209,6 +3264,11 @@ function renderAccessManager(){
       saveData();
       if(currentUser && currentUser.username===u.username) applyRoleToUI();
     });
+    row.querySelector('[data-act="matricule"]').addEventListener('blur', (e)=>{
+      u.matricule = e.target.value.trim();
+      saveData();
+      renderBallisticAgentOptions();
+    });
     row.querySelectorAll('input[type=checkbox]').forEach(cb=>{
       cb.addEventListener('change', ()=>{
         const caseId = cb.dataset.caseId;
@@ -3238,17 +3298,19 @@ document.getElementById('createUserBtn').addEventListener('click', ()=>{
   const username = document.getElementById('newUserName').value.trim();
   const password = document.getElementById('newUserPass').value;
   const role = document.getElementById('newUserRole').value;
+  const matricule = document.getElementById('newUserMatricule').value.trim();
   const isID = document.getElementById('newUserIsID').checked;
   const isBCSO = document.getElementById('newUserIsBCSO').checked;
   const isBCSA = document.getElementById('newUserIsBCSA').checked;
   const isSupervision = document.getElementById('newUserIsSupervision').checked;
   if(!username || !password){ alert('Identifiant et mot de passe sont obligatoires.'); return; }
   if(findUser(username)){ alert('Cet identifiant existe déjà.'); return; }
-  data.users.push({id:uid('u'), username, passwordHash:hashString(password), role, isID, isBCSO, isBCSA, isSupervision, allowedCaseIds:[], equipment:[]});
+  data.users.push({id:uid('u'), username, passwordHash:hashString(password), role, matricule, isID, isBCSO, isBCSA, isSupervision, allowedCaseIds:[], equipment:[]});
   saveData();
   document.getElementById('newUserName').value='';
   document.getElementById('newUserPass').value='';
   document.getElementById('newUserRole').value='user';
+  document.getElementById('newUserMatricule').value='';
   document.getElementById('newUserIsID').checked=true;
   document.getElementById('newUserIsBCSO').checked=true;
   document.getElementById('newUserIsBCSA').checked=true;
@@ -3295,13 +3357,62 @@ function promptForName(opts, onOk){
   input.focus();
 }
 
-/* ============ INIT ============ */
-if(!data.cases || data.cases.length===0){ data.cases=[]; }
-if(!data.suspects) data.suspects=[];
-if(!data.nextSeq) data.nextSeq = data.cases.length+1;
+/* ============ INIT (Firebase) ============ */
 document.getElementById('btnLogout').addEventListener('click', logout);
-initAuth();
-switchMainView('home');
+
+function refreshCurrentView(){
+  const activeView = document.querySelector('.view.active');
+  if(!activeView) return;
+  const viewName = activeView.id.replace('view-','');
+  if(viewName==='case' && currentCaseId && getCase(currentCaseId)){
+    renderCaseHeader(); renderDossier(); renderBoard();
+  } else if(document.getElementById('view-'+viewName)){
+    switchMainView(viewName);
+  }
+}
+
+function setBootMessage(msg){
+  const el = document.getElementById('bootMessage');
+  if(el) el.textContent = msg;
+}
+function hideBootOverlay(){
+  const el = document.getElementById('bootOverlay');
+  if(el) el.classList.add('hide');
+}
+
+fbAuth.signInAnonymously().then(()=>{
+  return DOC_REF.get();
+}).then(snap=>{
+  if(snap.exists){
+    data = normalizeData(snap.data());
+    return null;
+  } else {
+    setBootMessage('Première connexion — préparation de la base partagée…');
+    data = normalizeData(loadData());
+    return DOC_REF.set(data);
+  }
+}).then(()=>{
+  if(!data.cases || data.cases.length===0){ data.cases=[]; }
+  if(!data.suspects) data.suspects=[];
+  if(!data.nextSeq) data.nextSeq = data.cases.length+1;
+  hideBootOverlay();
+  initAuth();
+  switchMainView('home');
+  lastPushedJSON = JSON.stringify(data);
+  DOC_REF.onSnapshot(snap=>{
+    if(!snap.exists) return;
+    const remote = snap.data();
+    const remoteJSON = JSON.stringify(remote);
+    if(remoteJSON === lastPushedJSON) return; // confirmation de notre propre écriture, on ignore
+    lastPushedJSON = remoteJSON;
+    data = normalizeData(remote);
+    refreshCurrentView();
+    setSaveIndicator('Mis à jour par un autre appareil', false);
+  });
+}).catch(err=>{
+  console.error('Firebase init failed', err);
+  setBootMessage('⚠️ Impossible de se connecter à la base de données. Vérifie ta connexion internet et recharge la page.');
+});
 </script>
 </body>
 </html>
